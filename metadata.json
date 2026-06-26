@@ -1,0 +1,6 @@
+{
+  "name": "Nova AI",
+  "description": "ChatGPT-like premium AI chat assistant with smart history management and custom personas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
