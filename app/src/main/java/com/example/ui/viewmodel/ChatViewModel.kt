@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.BuildConfig
 import com.example.data.api.Content
 import com.example.data.api.GeminiRequest
+import com.example.data.api.InlineData
 import com.example.data.api.Part
 import com.example.data.api.RetrofitClient
 import com.example.data.model.ChatMessage
@@ -425,8 +426,9 @@ class ChatViewModel(
         _error.value = null
     }
 
-    fun sendMessage(text: String) {
-        if (text.isBlank()) return
+    fun sendMessage(text: String, imageUri: String? = null, imageBase64: String? = null) {
+        val finalImgText = if (text.isBlank() && imageBase64 != null) "Analyze this image" else text
+        if (finalImgText.isBlank() && imageUri == null) return
 
         val key = BuildConfig.GEMINI_API_KEY
         if (key.isEmpty() || key == "MY_GEMINI_API_KEY") {
@@ -451,7 +453,7 @@ class ChatViewModel(
             // Allocate a chat room if none is currently selected
             var room = _currentRoom.value
             if (room == null) {
-                val autoTitle = if (text.length > 25) text.substring(0, 25) + "..." else text
+                val autoTitle = if (finalImgText.length > 25) finalImgText.substring(0, 25) + "..." else finalImgText
                 val newRoom = ChatRoom(
                     id = UUID.randomUUID().toString(),
                     title = autoTitle,
@@ -488,8 +490,8 @@ class ChatViewModel(
                 }
             }
 
-            // Save user message
-            val userMsg = ChatMessage(roomId = room.id, role = "user", text = text)
+            // Save user message with imageUrl if available
+            val userMsg = ChatMessage(roomId = room.id, role = "user", text = finalImgText, imageUrl = imageUri)
             repository.insertMessage(userMsg)
 
             _isGenerating.value = true
@@ -498,13 +500,24 @@ class ChatViewModel(
             try {
                 // Load messages context
                 val history = repository.getMessagesForRoomSync(room.id)
-                val modelToUse = if (_isPremium.value) "gemini-3.1-pro-preview" else "gemini-3.5-flash"
+                val modelToUse = if (_isPremium.value) "gemini-3.1-pro-preview" else "gemini-2.5-flash"
 
                 // Map database messages to Gemini contents format
-                val apiContents = history.map { msg ->
+                val apiContents = history.mapIndexed { index, msg ->
                     val apiRole = if (msg.role == "user") "user" else "model"
+                    
+                    // If this is the latest user message and we have imageBase64, include the image in the part list
+                    val parts = if (index == history.lastIndex && imageBase64 != null) {
+                        listOf(
+                            Part(text = msg.text),
+                            Part(inlineData = InlineData(mimeType = "image/jpeg", data = imageBase64))
+                        )
+                    } else {
+                        listOf(Part(text = msg.text))
+                    }
+                    
                     Content(
-                        parts = listOf(Part(text = msg.text)),
+                        parts = parts,
                         role = apiRole
                     )
                 }

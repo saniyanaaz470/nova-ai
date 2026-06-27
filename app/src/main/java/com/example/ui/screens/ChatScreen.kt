@@ -134,6 +134,62 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
+import android.os.Build
+import android.provider.MediaStore
+import android.util.Base64
+import java.io.ByteArrayOutputStream
+
+fun getCompressedBase64AndBitmap(context: android.content.Context, uri: android.net.Uri): Pair<Bitmap, String>? {
+    return try {
+        val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val source = ImageDecoder.createSource(context.contentResolver, uri)
+            ImageDecoder.decodeBitmap(source)
+        } else {
+            @Suppress("DEPRECATION")
+            MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
+        }
+
+        val maxDimension = 1024
+        val scaledBitmap = if (bitmap.width > maxDimension || bitmap.height > maxDimension) {
+            val aspectRatio = bitmap.width.toFloat() / bitmap.height.toFloat()
+            val width = if (aspectRatio > 1) maxDimension else (maxDimension * aspectRatio).toInt()
+            val height = if (aspectRatio > 1) (maxDimension / aspectRatio).toInt() else maxDimension
+            Bitmap.createScaledBitmap(bitmap, width, height, true)
+        } else {
+            bitmap
+        }
+
+        val outputStream = ByteArrayOutputStream()
+        scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 80, outputStream)
+        val byteArray = outputStream.toByteArray()
+        val base64 = Base64.encodeToString(byteArray, Base64.NO_WRAP)
+        Pair(scaledBitmap, base64)
+    } catch (e: Exception) {
+        e.printStackTrace()
+        null
+    }
+}
+
+fun getCompressedBase64ForBitmap(bitmap: Bitmap): Pair<Bitmap, String> {
+    val maxDimension = 1024
+    val scaledBitmap = if (bitmap.width > maxDimension || bitmap.height > maxDimension) {
+        val aspectRatio = bitmap.width.toFloat() / bitmap.height.toFloat()
+        val width = if (aspectRatio > 1) maxDimension else (maxDimension * aspectRatio).toInt()
+        val height = if (aspectRatio > 1) (maxDimension / aspectRatio).toInt() else maxDimension
+        Bitmap.createScaledBitmap(bitmap, width, height, true)
+    } else {
+        bitmap
+    }
+
+    val outputStream = ByteArrayOutputStream()
+    scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 80, outputStream)
+    val byteArray = outputStream.toByteArray()
+    val base64 = Base64.encodeToString(byteArray, Base64.NO_WRAP)
+    return Pair(scaledBitmap, base64)
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -181,6 +237,11 @@ fun ChatScreen(
     var showPersonaSelector by remember { mutableStateOf(false) }
     var showPersonaDropdown by remember { mutableStateOf(false) }
     
+    // Image attachment states
+    var selectedImageUri by remember { mutableStateOf<String?>(null) }
+    var selectedImageBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var selectedImageBase64 by remember { mutableStateOf<String?>(null) }
+
     // Attachments and image mode state
     var showAttachmentsMenu by remember { mutableStateOf(false) }
     var isImageModeActive by remember { mutableStateOf(false) }
@@ -189,10 +250,21 @@ fun ChatScreen(
         contract = ActivityResultContracts.TakePicturePreview()
     ) { bitmap ->
         if (bitmap != null) {
-            viewModel.sendAttachmentMock(
-                attachmentType = "Camera Captured Photo",
-                name = "captured_image.png"
-            )
+            val result = getCompressedBase64ForBitmap(bitmap)
+            selectedImageBitmap = result.first
+            selectedImageBase64 = result.second
+            
+            try {
+                val cacheFile = java.io.File(context.cacheDir, "captured_temp_${System.currentTimeMillis()}.jpg")
+                val fos = java.io.FileOutputStream(cacheFile)
+                result.first.compress(Bitmap.CompressFormat.JPEG, 85, fos)
+                fos.flush()
+                fos.close()
+                selectedImageUri = cacheFile.absolutePath
+            } catch (e: Exception) {
+                e.printStackTrace()
+                selectedImageUri = "camera://captured"
+            }
         }
     }
 
@@ -200,10 +272,14 @@ fun ChatScreen(
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
         if (uri != null) {
-            viewModel.sendAttachmentMock(
-                attachmentType = "Photo Library Image",
-                name = "gallery_photo.jpg"
-            )
+            val result = getCompressedBase64AndBitmap(context, uri)
+            if (result != null) {
+                selectedImageUri = uri.toString()
+                selectedImageBitmap = result.first
+                selectedImageBase64 = result.second
+            } else {
+                Toast.makeText(context, "Failed to load selected image.", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -231,6 +307,14 @@ fun ChatScreen(
     LaunchedEffect(errorState) {
         if (errorState == "PremiumOnly" || errorState == "LimitReached") {
             showPaywall = true
+            viewModel.clearError()
+        } else if (errorState != null) {
+            val msg = if (errorState == "ApiKeyMissing") {
+                "⚠️ GEMINI_API_KEY is missing! Please configure your GEMINI_API_KEY secret in the Secrets panel in AI Studio."
+            } else {
+                errorState!!
+            }
+            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
             viewModel.clearError()
         }
     }
@@ -1445,6 +1529,43 @@ fun ChatScreen(
                             .padding(horizontal = 12.dp, vertical = 8.dp)
                     ) {
 
+                        if (selectedImageUri != null) {
+                            Box(
+                                modifier = Modifier
+                                    .padding(bottom = 8.dp)
+                                    .size(100.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
+                                    .background(Color.White.copy(alpha = 0.05f))
+                            ) {
+                                AsyncImage(
+                                    model = selectedImageBitmap ?: selectedImageUri,
+                                    contentDescription = "Selected Image Preview",
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(4.dp)
+                                        .size(24.dp)
+                                        .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                                        .clickable {
+                                            selectedImageUri = null
+                                            selectedImageBitmap = null
+                                            selectedImageBase64 = null
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Clear,
+                                        contentDescription = "Remove image",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                            }
+                        }
 
                         if (isImageModeActive) {
                             Row(
@@ -1515,12 +1636,15 @@ fun ChatScreen(
                                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                                 keyboardActions = KeyboardActions(
                                     onSend = {
-                                        if (inputText.isNotBlank() && !isGenerating) {
+                                        if ((inputText.isNotBlank() || selectedImageUri != null) && !isGenerating) {
                                             if (isImageModeActive) {
                                                 viewModel.generateAndSendAIImage(inputText)
                                                 isImageModeActive = false
                                             } else {
-                                                viewModel.sendMessage(inputText)
+                                                viewModel.sendMessage(inputText, selectedImageUri, selectedImageBase64)
+                                                selectedImageUri = null
+                                                selectedImageBitmap = null
+                                                selectedImageBase64 = null
                                             }
                                             inputText = ""
                                             focusManager.clearFocus()
@@ -1540,22 +1664,25 @@ fun ChatScreen(
 
                             IconButton(
                                 onClick = {
-                                    if (inputText.isNotBlank() && !isGenerating) {
+                                    if ((inputText.isNotBlank() || selectedImageUri != null) && !isGenerating) {
                                         if (isImageModeActive) {
                                             viewModel.generateAndSendAIImage(inputText)
                                             isImageModeActive = false
                                         } else {
-                                            viewModel.sendMessage(inputText)
+                                            viewModel.sendMessage(inputText, selectedImageUri, selectedImageBase64)
+                                            selectedImageUri = null
+                                            selectedImageBitmap = null
+                                            selectedImageBase64 = null
                                         }
                                         inputText = ""
                                         focusManager.clearFocus()
                                     }
                                 },
-                                enabled = inputText.isNotBlank() && !isGenerating,
+                                enabled = (inputText.isNotBlank() || selectedImageUri != null) && !isGenerating,
                                 modifier = Modifier
                                     .size(36.dp)
                                     .background(
-                                        if (inputText.isNotBlank()) {
+                                        if (inputText.isNotBlank() || selectedImageUri != null) {
                                             if (isImageModeActive) PremiumGold else ChatGptGreen
                                         } else {
                                             Color.White.copy(alpha = 0.05f)
@@ -1567,24 +1694,11 @@ fun ChatScreen(
                                 Icon(
                                     imageVector = Icons.Default.Send,
                                     contentDescription = "Send",
-                                    tint = if (inputText.isNotBlank()) Color.White else TextGray,
+                                    tint = if (inputText.isNotBlank() || selectedImageUri != null) Color.White else TextGray,
                                     modifier = Modifier.size(16.dp)
                                 )
                             }
                         }
-
-                        // Tiny ChatGPT style warning (keeps screen super clean)
-                        Text(
-                            text = "Nova AI may produce inaccurate information about people, places, or facts. Enterprise proxy active.",
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                fontSize = 10.sp,
-                                color = TextGray.copy(alpha = 0.4f),
-                                textAlign = TextAlign.Center
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(top = 6.dp, bottom = 4.dp)
-                        )
                     }
                 }
             }
